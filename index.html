@@ -154,6 +154,8 @@ details>summary{cursor:pointer;color:var(--muted);font-weight:600;font-size:12.5
     <button class="btn" id="installBtn" hidden title="Install Flyer Creator as an app">⬇ Install app</button>
     <button class="btn" id="saveBtn">Save flyer</button>
     <button class="btn primary" id="exportBtn">Download PNG</button>
+    <button class="btn" id="motionBtn" title="Make a moving video of the flyer with your song">🎬 Motion</button>
+    <button class="btn" id="sizesBtn" title="Square and Story versions of this flyer">📐 Sizes</button>
     <button class="btn" id="waBtn" style="background:#25d366;color:#04210f;border-color:#25d366;font-weight:700">WhatsApp</button>
   </header>
 
@@ -1452,6 +1454,173 @@ async function exportPNG(scale = 2) {
   settings.usage.exports++; saveSettings();
   saveFile(name, blob);
 }
+// ---------- 📐 Sizes: the same flyer as a square post and a tall Story, with a soft blurred fill around it ----------
+const SIZE_PRESETS = [["story", "Story / Status (tall)", 1080, 1920], ["square", "Square post", 1080, 1080]];
+function fitOnSize(src, W, H) {
+  const c = document.createElement("canvas"); c.width = W; c.height = H; const x = c.getContext("2d");
+  const cov = Math.max(W / src.width, H / src.height); x.filter = "blur(" + Math.round(W / 22) + "px) brightness(.55) saturate(1.2)";
+  x.drawImage(src, (W - src.width * cov) / 2, (H - src.height * cov) / 2, src.width * cov, src.height * cov); x.filter = "none";
+  const fit = Math.min(W / src.width, H / src.height) * .97, w = src.width * fit, hh = src.height * fit;
+  x.save(); x.shadowColor = "rgba(0,0,0,.7)"; x.shadowBlur = W / 30; x.drawImage(src, (W - w) / 2, (H - hh) / 2, w, hh); x.restore();
+  return c;
+}
+async function flyerCanvas(scale = 2) {
+  await document.fonts.ready; await waitImages();
+  const c = document.createElement("canvas"); c.width = doc.w * scale; c.height = doc.h * scale; const x = c.getContext("2d");
+  x.scale(scale, scale); const old = RS; RS = scale; bgCacheKey = "";
+  try { renderDoc(x, true); } finally { RS = old; bgCacheKey = ""; invalidate(); }
+  return c;
+}
+async function openSizes() {
+  toast("Making the other sizes…"); let base; try { base = await flyerCanvas(2); } catch (e) { toast(e.message || "Couldn't render the flyer."); return; }
+  const nm = slug((doc.form.title || "flyer") + "-" + (doc.form.date || ""));
+  const cards = await Promise.all(SIZE_PRESETS.map(async ([k, label, W, H]) => {
+    const c = fitOnSize(base, W, H), blob = await new Promise(r => c.toBlob(r, "image/jpeg", .92)), name = nm + "-" + k + ".jpg", file = new File([blob], name, { type: "image/jpeg" });
+    const url = URL.createObjectURL(blob);
+    return h("div", { style: "flex:1;min-width:140px;display:flex;flex-direction:column;gap:6px;align-items:stretch" },
+      h("img", { src: url, alt: label, style: "width:100%;max-height:40vh;object-fit:contain;background:#000;border-radius:8px" }),
+      h("b", { style: "font-size:13px" }, label + " · " + W + "×" + H),
+      h("button", { class: "btn primary", type: "button", onclick: () => { saveFile(name, blob); settings.usage.exports++; saveSettings(); } }, "Download"),
+      navigator.canShare && navigator.canShare({ files: [file] }) ? h("button", { class: "btn", type: "button", style: "background:#25d366;color:#04210f;border-color:#25d366;font-weight:700", onclick: () => navigator.share({ files: [file], text: shareText() }).catch(() => {}) }, "Share / WhatsApp") : null);
+  }));
+  const box = h("div", { class: "modal", onclick: e => { if (e.target === box) box.remove(); } }, h("div", { class: "modal-box", style: "max-width:720px" },
+    h("div", { class: "row", style: "justify-content:space-between" }, h("h3", { style: "margin:0" }, "📐 Other sizes"), h("button", { class: "btn", type: "button", onclick: () => box.remove() }, "Close")),
+    h("p", { class: "hint", style: "margin:0" }, "Same flyer, ready for Instagram/WhatsApp Status and square Facebook posts. Free."),
+    h("div", { class: "row", style: "gap:12px;align-items:flex-start;flex-wrap:wrap" }, ...cards)));
+  document.body.append(box);
+}
+// ---------- 🎬 Motion: a moving version of the flyer (up to 1 minute) with the user's own song ----------
+const MOTION_FX = { christmas: "snow", newyear: "confetti", valentine: "hearts", stpatrick: "sparkle", halloween: "embers", thanksgiving: "leaves", easter: "confetti", juneteenth: "confetti", cinco: "confetti", mardigras: "confetti", birthday: "confetti", club: "sparkle" };
+let motionSize = "flyer", motionSong = null, motionLen = 60, motionStart = 0, motionLoaded = false;
+async function motionLoadSong() { if (motionLoaded) return; motionLoaded = true; try { const v = await Local.get("motion:song"); if (v && v.blob) { motionSong = v; motionStart = v.start || 0; } } catch {} }
+async function motionBase() {
+  await document.fonts.ready; await waitImages();
+  const vw = 1080, sc = vw * 1.4 / doc.w;
+  const c = document.createElement("canvas"); c.width = Math.round(doc.w * sc); c.height = Math.round(doc.h * sc); const x = c.getContext("2d");
+  x.scale(sc, sc); const old = RS; RS = sc; bgCacheKey = "";
+  try { renderDoc(x, true); } finally { RS = old; bgCacheKey = ""; invalidate(); }
+  if (motionSize !== "flyer") { const pr = SIZE_PRESETS.find(p => p[0] === motionSize); const f = fitOnSize(c, pr[2] * 1.4, pr[3] * 1.4); return { img: f, W: pr[2], H: pr[3] }; }
+  const W = vw, H = Math.round(vw * doc.h / doc.w / 2) * 2;
+  return { img: c, W, H };
+}
+function motionParts(kind, W, H, cols) {
+  const n = kind === "snow" ? 140 : kind === "embers" ? 70 : kind === "hearts" ? 34 : kind === "leaves" ? 40 : kind === "sparkle" ? 60 : 110, out = [];
+  for (let i = 0; i < n; i++) out.push({ x: Math.random() * W, y: Math.random() * H, r: (kind === "snow" ? 2 + Math.random() * 6 : kind === "hearts" ? 10 + Math.random() * 16 : kind === "leaves" ? 9 + Math.random() * 10 : kind === "sparkle" ? 2 + Math.random() * 5 : 5 + Math.random() * 8) * W / 1080, sp: .4 + Math.random(), ph: Math.random() * 6.28, rot: Math.random() * 6.28, col: kind === "snow" ? "#fff" : cols[i % cols.length] });
+  return out;
+}
+function heartPath(x, cx, cy, r) { x.beginPath(); x.moveTo(cx, cy + r * .9); x.bezierCurveTo(cx - r * 1.6, cy - r * .2, cx - r * .6, cy - r * 1.3, cx, cy - r * .4); x.bezierCurveTo(cx + r * .6, cy - r * 1.3, cx + r * 1.6, cy - r * .2, cx, cy + r * .9); x.fill(); }
+const easeIO = t => t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+// Camera tour: wide, title close-up, wide, middle (DJs), wide, details close-up… repeats so every part can be read.
+const MOTION_SHOTS = [{ z: 1, cx: .5, cy: .5 }, { z: 1.14, cx: .5, cy: .2 }, { z: 1.02, cx: .5, cy: .5 }, { z: 1.12, cx: .5, cy: .55 }, { z: 1, cx: .5, cy: .5 }, { z: 1.14, cx: .5, cy: .82 }];
+function motionCam(t) {
+  const seg = 5, i = Math.floor(t / seg), f = (t % seg) / seg, a = MOTION_SHOTS[i % MOTION_SHOTS.length], b = MOTION_SHOTS[(i + 1) % MOTION_SHOTS.length];
+  const k = f < .65 ? 0 : easeIO((f - .65) / .35);
+  return { z: a.z + (b.z - a.z) * k, cx: a.cx + (b.cx - a.cx) * k, cy: a.cy + (b.cy - a.cy) * k };
+}
+function drawMotion(x, t, T, m, parts, kind, cols, beat) {
+  const { img, W, H } = m, dt = 1 / 30;
+  x.save(); x.fillStyle = "#000"; x.fillRect(0, 0, W, H);
+  const intro = Math.min(1, t / 1.6), ie = 1 - Math.pow(1 - intro, 3);
+  const cam = motionCam(t), breathe = 1 + .015 * Math.sin(t * 1.3) + beat * .012;
+  const z = cam.z * breathe * (1.25 - .25 * ie);
+  const dw = W * z, dh = H * z;
+  let ox = W / 2 - cam.cx * dw, oy = H / 2 - cam.cy * dh; ox = Math.min(0, Math.max(W - dw, ox)); oy = Math.min(0, Math.max(H - dh, oy));
+  x.globalAlpha = ie; x.drawImage(img, ox, oy, dw, dh); x.globalAlpha = 1;
+  // club lights sweeping up from the bottom
+  x.globalCompositeOperation = "lighter";
+  for (let j = 0; j < 2; j++) {
+    const ang = -Math.PI / 2 + Math.sin(t * .7 + j * 2.4) * .55, bx = W * (j ? .85 : .15), by = H * 1.02, L = H * 1.1, sw = .09;
+    const g = x.createRadialGradient(bx, by, 0, bx, by, L); g.addColorStop(0, cols[j % cols.length] + "55"); g.addColorStop(1, cols[j % cols.length] + "00");
+    x.fillStyle = g; x.beginPath(); x.moveTo(bx, by); x.arc(bx, by, L, ang - sw, ang + sw); x.closePath(); x.globalAlpha = .55 + beat * .45; x.fill();
+  }
+  x.globalAlpha = 1;
+  // light sweep across the flyer every 7 seconds
+  const sp = (t % 7) / 1.4; if (sp < 1) { const sx = -W * .5 + sp * W * 2; const g = x.createLinearGradient(sx - W * .25, 0, sx + W * .25, H * .3); g.addColorStop(0, "rgba(255,255,255,0)"); g.addColorStop(.5, "rgba(255,255,255,.22)"); g.addColorStop(1, "rgba(255,255,255,0)"); x.fillStyle = g; x.fillRect(0, 0, W, H); }
+  // beat glow at the edges
+  if (beat > .05) { const g = x.createRadialGradient(W / 2, H / 2, Math.min(W, H) * .45, W / 2, H / 2, Math.max(W, H) * .75); g.addColorStop(0, "rgba(0,0,0,0)"); g.addColorStop(1, cols[0] + "66"); x.globalAlpha = Math.min(1, beat); x.fillStyle = g; x.fillRect(0, 0, W, H); x.globalAlpha = 1; }
+  x.globalCompositeOperation = "source-over";
+  // particles
+  for (const p of parts) {
+    if (kind === "snow") { p.y += p.sp * 90 * dt * W / 1080; p.x += Math.sin(t + p.ph) * .6; }
+    else if (kind === "embers") { p.y -= p.sp * 70 * dt * W / 1080; p.x += Math.sin(t * 2 + p.ph) * .8; }
+    else if (kind === "sparkle") { p.y -= p.sp * 15 * dt; }
+    else { p.y += p.sp * 120 * dt * W / 1080; p.x += Math.sin(t * 1.5 + p.ph) * 1.2; p.rot += .05 * p.sp; }
+    if (p.y > H + 30) { p.y = -30; p.x = Math.random() * W; } if (p.y < -30) { p.y = H + 30; p.x = Math.random() * W; }
+    x.fillStyle = p.col;
+    if (kind === "snow") { x.globalAlpha = .55 + .35 * p.sp / 1.4; x.beginPath(); x.arc(p.x, p.y, p.r, 0, 6.28); x.fill(); }
+    else if (kind === "embers") { x.globalAlpha = .5 + .5 * Math.abs(Math.sin(t * 3 + p.ph)); x.shadowColor = p.col; x.shadowBlur = 12; x.beginPath(); x.arc(p.x, p.y, p.r * .45, 0, 6.28); x.fill(); x.shadowBlur = 0; }
+    else if (kind === "hearts") { x.globalAlpha = .8; heartPath(x, p.x, p.y, p.r); }
+    else if (kind === "sparkle") { const a = Math.max(0, Math.sin(t * 2.5 + p.ph)); x.globalAlpha = a; const r = p.r * (1 + a); x.beginPath(); x.moveTo(p.x, p.y - r * 2.2); x.lineTo(p.x + r * .4, p.y - r * .4); x.lineTo(p.x + r * 2.2, p.y); x.lineTo(p.x + r * .4, p.y + r * .4); x.lineTo(p.x, p.y + r * 2.2); x.lineTo(p.x - r * .4, p.y + r * .4); x.lineTo(p.x - r * 2.2, p.y); x.lineTo(p.x - r * .4, p.y - r * .4); x.closePath(); x.fill(); }
+    else { x.globalAlpha = .9; x.save(); x.translate(p.x, p.y); x.rotate(p.rot); if (kind === "leaves") { x.beginPath(); x.ellipse(0, 0, p.r, p.r * .5, 0, 0, 6.28); x.fill(); } else x.fillRect(-p.r / 2, -p.r / 4, p.r, p.r / 2 * (.4 + Math.abs(Math.sin(p.rot)))); x.restore(); }
+  }
+  x.globalAlpha = 1;
+  // flash at the end of the intro, fade out at the end
+  if (t > 1.2 && t < 1.8) { x.fillStyle = "rgba(255,255,255," + (1 - Math.abs(t - 1.4) / .4) * .5 + ")"; x.fillRect(0, 0, W, H); }
+  if (t > T - 1.2) { x.fillStyle = "rgba(0,0,0," + Math.min(1, (t - (T - 1.2)) / 1.2) + ")"; x.fillRect(0, 0, W, H); }
+  x.restore();
+}
+function motionMime() { const L = ["video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"]; if (!window.MediaRecorder) return ""; return L.find(t => { try { return MediaRecorder.isTypeSupported(t); } catch { return false; } }) || ""; }
+async function openMotion() {
+  await motionLoadSong();
+  const theme = (doc.ai && doc.ai.theme) || doc.theme, kind = MOTION_FX[theme] || "confetti", cols = [...(THEMES[theme] ? THEMES[theme].ui : ["#ffd23f", "#ff3d7f", "#3df2ff"]), "#ffd23f"].map(c => c.length === 4 ? "#" + [...c.slice(1)].map(ch => ch + ch).join("") : c.slice(0, 7));
+  let m; toast("Getting the motion flyer ready…");
+  try { m = await motionBase(); } catch (e) { toast(e.message || "Couldn't render the flyer."); return; }
+  const cv = h("canvas", { width: m.W, height: m.H, style: "width:100%;max-height:52vh;object-fit:contain;background:#000;border-radius:8px" });
+  const cx = cv.getContext("2d"); let parts = motionParts(kind, m.W, m.H, cols), alive = true, rec = null, t0 = performance.now();
+  const status = h("p", { class: "hint", style: "margin:0" }, "");
+  const songLbl = h("span", { class: "hint", style: "margin:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, motionSong ? "♪ " + motionSong.name : "No song yet (video will be silent)");
+  const file = h("input", { type: "file", accept: "audio/*,.mp3,.m4a,.wav,.aac", hidden: true, onchange: async e => { const f = e.target.files[0]; if (!f) return; motionSong = { name: f.name, blob: f, start: 0 }; motionStart = 0; startIn.value = 0; songLbl.textContent = "♪ " + f.name; try { await Local.set("motion:song", { name: f.name, blob: f, start: 0 }); } catch {} } });
+  const startIn = h("input", { type: "number", min: 0, step: 1, value: motionStart, style: "width:70px", onchange: e => { motionStart = Math.max(0, +e.target.value || 0); if (motionSong) { motionSong.start = motionStart; Local.set("motion:song", motionSong).catch(() => {}); } } });
+  const lenSel = h("select", { onchange: e => motionLen = +e.target.value }, ...[[15, "15 seconds"], [30, "30 seconds"], [60, "1 minute"]].map(([v, l]) => h("option", { value: v, selected: v === motionLen }, l)));
+  const go = h("button", { class: "btn primary", type: "button", style: "flex:1", onclick: () => rec ? stop(false) : record() }, "🎬 Make video");
+  const close = () => { alive = false; if (rec) stop(true); box.remove(); };
+  const box = h("div", { class: "modal", onclick: e => { if (e.target === box) close(); } }, h("div", { class: "modal-box" },
+    h("div", { class: "row", style: "justify-content:space-between" }, h("h3", { style: "margin:0" }, "🎬 Motion flyer"), h("button", { class: "btn", type: "button", onclick: close }, "Close")),
+    cv,
+    h("div", { class: "row", style: "gap:8px;align-items:center" }, h("button", { class: "btn", type: "button", onclick: () => file.click() }, "🎵 Upload song"), songLbl, file),
+    h("div", { class: "row", style: "gap:8px;align-items:center;flex-wrap:wrap" }, h("span", { class: "hint", style: "margin:0" }, "Song starts at"), startIn, h("span", { class: "hint", style: "margin:0" }, "sec · Length"), lenSel,
+      h("span", { class: "hint", style: "margin:0" }, "· Size"), h("select", { onchange: async e => { motionSize = e.target.value; close(); openMotion(); } }, ...[["flyer", "Flyer"], ["story", "Story (tall)"], ["square", "Square"]].map(([v, l]) => h("option", { value: v, selected: v === motionSize }, l)))),
+    h("div", { class: "row", style: "gap:8px" }, go), status,
+    h("p", { class: "hint", style: "margin:0" }, "Free (no AI cost). Keep this screen open while it records; it takes as long as the video.")));
+  document.body.append(box);
+  let actx = null, analyser = null, fbuf = null;
+  const beatNow = t => { if (analyser) { analyser.getByteFrequencyData(fbuf); let s = 0; for (let i = 1; i < 8; i++) s += fbuf[i]; const v = s / 7 / 255; return Math.max(0, (v - .45) * 2.2); } return Math.pow(Math.max(0, Math.cos(t * Math.PI * 2 * 2)), 8) * .6; };
+  const loop = () => { if (!alive) return; const T = rec ? rec.T : motionLen, t = rec ? (performance.now() - rec.t0) / 1000 : ((performance.now() - t0) / 1000) % T; drawMotion(cx, t, T, m, parts, kind, cols, beatNow(t)); if (rec) { status.textContent = "Recording… " + Math.min(rec.T, Math.floor(t)) + " / " + rec.T + " s"; if (t >= rec.T) stop(false); } requestAnimationFrame(loop); };
+  requestAnimationFrame(loop);
+  async function record() {
+    const mime = motionMime(); if (!mime || !cv.captureStream) { status.textContent = "This browser can't record video. Try Chrome or Safari."; return; }
+    const T = motionLen, stream = cv.captureStream(30); let src = null;
+    if (motionSong) {
+      try {
+        actx = new (window.AudioContext || window.webkitAudioContext)(); const buf = await actx.decodeAudioData(await motionSong.blob.arrayBuffer());
+        src = actx.createBufferSource(); src.buffer = buf; src.loop = buf.duration < T + motionStart;
+        const gain = actx.createGain(), dest = actx.createMediaStreamDestination(); analyser = actx.createAnalyser(); analyser.fftSize = 256; fbuf = new Uint8Array(analyser.frequencyBinCount);
+        src.connect(gain); gain.connect(dest); gain.connect(analyser); gain.connect(actx.destination);
+        const now = actx.currentTime; gain.gain.setValueAtTime(0, now); gain.gain.linearRampToValueAtTime(1, now + .8); gain.gain.setValueAtTime(1, now + T - 2); gain.gain.linearRampToValueAtTime(0, now + T);
+        for (const tr of dest.stream.getAudioTracks()) stream.addTrack(tr);
+      } catch (e) { console.warn(e); status.textContent = "Couldn't read that song, so the video will be silent."; src = null; }
+    }
+    const chunks = [], mr = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8e6 });
+    mr.ondataavailable = e => e.data && e.data.size && chunks.push(e.data);
+    parts = motionParts(kind, m.W, m.H, cols);
+    rec = { mr, chunks, T, mime, src, t0: performance.now() }; mr.start(500); if (src) src.start(0, Math.min(motionStart, Math.max(0, src.buffer.duration - 1)));
+    go.textContent = "■ Stop";
+  }
+  function stop(cancel) {
+    const r = rec; if (!r) return; rec = null; go.textContent = "🎬 Make video";
+    try { r.src && r.src.stop(); } catch {} analyser = null; if (actx) { actx.close().catch(() => {}); actx = null; }
+    r.mr.onstop = async () => {
+      if (cancel || !r.chunks.length) { status.textContent = cancel ? "" : "Nothing was recorded."; return; }
+      const type = r.mime.split(";")[0], blob = new Blob(r.chunks, { type }), name = slug((doc.form.title || "flyer") + "-" + (doc.form.date || "")) + (type === "video/mp4" ? ".mp4" : ".webm");
+      status.textContent = "Video ready (" + Math.round(blob.size / 1e6 * 10) / 10 + " MB).";
+      const f = new File([blob], name, { type });
+      const share = navigator.canShare && navigator.canShare({ files: [f] }) ? h("button", { class: "btn", type: "button", style: "background:#25d366;color:#04210f;border-color:#25d366;font-weight:700", onclick: () => navigator.share({ files: [f], text: shareText() }).catch(() => {}) }, "Share / WhatsApp") : null;
+      status.replaceChildren(document.createTextNode("Video ready (" + Math.round(blob.size / 1e6 * 10) / 10 + " MB). "), h("button", { class: "btn primary", type: "button", onclick: () => saveFile(name, blob) }, "Download video"), " ", share || "");
+      settings.usage.exports++; saveSettings(); saveFile(name, blob);
+    };
+    try { r.mr.stop(); } catch {}
+  }
+}
 async function refToData(ref) {
   if (!ref || ref.builtin || ref.data) return ref;
   try { const b = await (await fetch(refSrc(ref))).blob(); return { data: await new Promise(r => { const f = new FileReader(); f.onload = () => r(f.result); f.readAsDataURL(b); }) }; } catch { return ref; }
@@ -1906,8 +2075,8 @@ function makeButton() {
 
 
 /* ============================== version, settings, credits ============================== */
-const APP_VERSION = "3.4.0", APP_BUILD = "Nov 24, 2026";
-const CHANGELOG = [["3.4.0", "AI flyers are spell-checked automatically: the app reads the finished flyer back and fixes wrong, extra or missing words once. No more frames or boxes drawn behind the DJs. Outfits are made from bigger, sharper source photos and keep the whole head and hat, with Halloween decorations removed."], ["3.3.5", "Outfits come back without a background: if the first try has one, the app asks again for a clean green screen and cuts it out. New “Original photo” button next to a DJ goes back to his own picture."], ["3.3.4", "A DJ without this holiday’s outfit shows a ✨ Make outfit button right by his name."], ["3.3.3", "Make my flyer now dresses every DJ on the flyer for the holiday first (outfits are made once and reused). DJs: pick Photos + names or Names only."], ["3.3.2", "Removed repeats: each action now lives in one place. Save flyer is only in the top bar, Create outfits only on the DJs tab, and Shuffle look only on the Themes tab."], ["3.3.1", "One Make my flyer button only (it stays at the bottom of the screen)."], ["3.3.0", "New Locations tab: add, edit and pick locations (name, header lines, address). “+ New” next to Location on the Build tab opens a blank one."], ["3.2.4", "Turned-off promos (happy hour, drinks, cover, prize and so on) are now explicitly left out of AI flyers, and the app tells you when you changed details after making a flyer."], ["3.2.3", "A new device or a new flyer starts on the next Friday with that holiday (not last Halloween)."], ["3.2.2", "The installed app now checks for a newer version every time it opens and updates itself right away."], ["3.2.1", "Music list never repeats a genre: “Rock” is left out when “Classic Rock” is picked (same for any genre already covered by a longer one). Added Oldies and Motown to the genre list."], ["3.2.0", "Names only (no DJ photos): tick it under DJs on this flyer and the flyer shows the DJ names in big lettering without their pictures."], ["3.1.0", "AI flyers keep the DJs' real faces: the AI paints the scene, lettering and details with room for the DJs, and the app places each DJ's own photo or holiday outfit there with his name. (Optional setting lets the AI draw them instead.)"], ["3.0.2", "Text is never too small to read: AI flyers are told to keep every line big and bold, and the simple version wraps long lines instead of shrinking them below a readable size."], ["3.0.1", "AI flyers keep each DJ's name on the right man and keep the order from the DJ list (DJ Jamz on the left)."], ["3.0.0", "AI-designed flyers: ✨ Make my flyer now has Google Gemini 3 Pro Image design the whole flyer in the style of your Halloween flyer (holiday scene, DJs in costume, styled lettering and all your details), about 13¢ each. Try again or type a fix (like a spelling). Upload any flyer you love as the style example. The simple editable version is still there."], ["2.7.0", "Automatic flyer maker: fill in the event and press ✨ Make my flyer. It picks the holiday look from the date, dresses the DJs (with a Gemini key), lays everything out with no gaps or overlaps, shrinks long text to fit, places the logos, and updates the birthday sign and holiday wording. Nothing to adjust by hand."], ["2.6.1", "Removed duplicate buttons: Save flyer, Download PNG and WhatsApp each appear once, in the top bar."], ["2.6.0", "Share to WhatsApp: on a phone it opens the share sheet with the flyer picture attached, ready to pick WhatsApp and a chat. Where sharing isn't available it saves the picture and opens WhatsApp with the event text."], ["2.5.0", "Installable app: open Flyer Creator from its web address and install it on your phone or computer (⬇ Install app, or Share → Add to Home Screen on iPhone). Works offline once installed; each device keeps its own data, and Export/Import flyer file moves flyers between them."], ["2.4.0", "🎲 Shuffle look under the theme picker: a new style for the same holiday (colors, fonts, text effects, background pattern) while your words, DJs and logos stay. Back / Next through past looks, ♥ Save look for favorites, Original to reset. With a Gemini key, ✨ AI background paints a new background (cost shown)."], ["2.3.0", "Export flyer file / Import flyer file (Saved tab) moves a flyer with its DJs, outfits, logos and location into any version or device. Back up everything / Restore backup in Settings. The Create button always resets to Create after every run. Create is always clickable: when every DJ already has the outfit it becomes “Remake [holiday] outfits” (cost shown) and replaces them. Each DJ has a ↻ Redo button. The button can no longer get stuck after an error."], ["2.2.1", "Safer automatic background removal: it only runs when the background is plain, so it can never cut into a DJ. Use ✂ for anything it leaves."], ["2.2.0", "The Create button shows what this run will cost (for example: 2 outfits × ~4¢ = ~8¢), counting only DJs that still need the outfit. After a run it shows what was used, and Credits keeps the last run and a running total. Outfits always come out as cut-outs: stricter green-screen prompt, automatic background removal for any plain background (green, white or grey) with soft edges, and a ✂ Remove background button on the Build tab and on each outfit."], ["2.1.0", "New app icon for the browser tab and phone home screen."], ["2.0.0", "Gemini is back as the main way to make outfits in the app (about 4¢ each). Test key shows exactly what Google says, with 4 fix-it steps in Settings. ElevenLabs stays as an option for Pro plans."], ["1.9.0", "Holiday outfits now use ElevenLabs only. Key and Test key are in Settings, and the cost (about 433 credits per outfit) is on the button and in Credits. On ElevenLabs Pro the button makes outfits in the app; on other plans it gives you a request to paste to Claude in chat."], ["1.8.0", "DJ Jamz now has a built-in Christmas outfit (made with ElevenLabs). It shows automatically when you pick the Christmas theme."], ["1.7.1", "Pasted keys are cleaned up automatically, and Test key explains errors in plain words."], ["1.7.0", "API key lives only in Settings, with a Test key button. Create outfits always shows a clear message."], ["1.6.0", "Create outfits starts right away: no popup. The cost is on the button and a progress bar shows while it works. No key saved yet? A key box appears under the button and it starts as soon as you paste."], ["1.5.0", "One-tap outfits for every DJ on the flyer."], ["1.4.0", "Big “Create outfits” button on the Build tab, under the theme picker. It opens a step-by-step window for every DJ on the flyer."], ["1.3.0", "Nothing uses credits unless you choose to."], ["1.2.0", "Logos stay big enough to see: a minimum logo size (18% of the flyer width by default, adjustable in Settings). Nearby text makes a little room instead of the logo shrinking."], ["1.1.0", "Smart logo placement: logos go to the emptiest corner or edge, sized to fit, and move out of the way when DJs, promos or the theme change. Auto-place button and a setting to turn it off."], ["1.0.0", "First release: holiday themes, quick builder, DJ roster with holiday outfits, logos, locations, saved designs, PNG download, Credits and Settings."]];
+const APP_VERSION = "3.6.0", APP_BUILD = "Nov 24, 2026";
+const CHANGELOG = [["3.6.0", "📐 Sizes (top bar): the same flyer as a tall Story/Status picture and a square post, ready to download or share. Motion videos can be made in those sizes too."], ["3.5.0", "🎬 Motion (top bar): turns the flyer into a video up to 1 minute long, with a camera tour of the title, DJs and details, club lights, a light sweep and holiday effects (snow, confetti, hearts, embers). Upload your own song; the lights pulse to the beat. Download or share it to WhatsApp."], ["3.4.0", "AI flyers are spell-checked automatically: the app reads the finished flyer back and fixes wrong, extra or missing words once. No more frames or boxes drawn behind the DJs. Outfits are made from bigger, sharper source photos and keep the whole head and hat, with Halloween decorations removed."], ["3.3.5", "Outfits come back without a background: if the first try has one, the app asks again for a clean green screen and cuts it out. New “Original photo” button next to a DJ goes back to his own picture."], ["3.3.4", "A DJ without this holiday’s outfit shows a ✨ Make outfit button right by his name."], ["3.3.3", "Make my flyer now dresses every DJ on the flyer for the holiday first (outfits are made once and reused). DJs: pick Photos + names or Names only."], ["3.3.2", "Removed repeats: each action now lives in one place. Save flyer is only in the top bar, Create outfits only on the DJs tab, and Shuffle look only on the Themes tab."], ["3.3.1", "One Make my flyer button only (it stays at the bottom of the screen)."], ["3.3.0", "New Locations tab: add, edit and pick locations (name, header lines, address). “+ New” next to Location on the Build tab opens a blank one."], ["3.2.4", "Turned-off promos (happy hour, drinks, cover, prize and so on) are now explicitly left out of AI flyers, and the app tells you when you changed details after making a flyer."], ["3.2.3", "A new device or a new flyer starts on the next Friday with that holiday (not last Halloween)."], ["3.2.2", "The installed app now checks for a newer version every time it opens and updates itself right away."], ["3.2.1", "Music list never repeats a genre: “Rock” is left out when “Classic Rock” is picked (same for any genre already covered by a longer one). Added Oldies and Motown to the genre list."], ["3.2.0", "Names only (no DJ photos): tick it under DJs on this flyer and the flyer shows the DJ names in big lettering without their pictures."], ["3.1.0", "AI flyers keep the DJs' real faces: the AI paints the scene, lettering and details with room for the DJs, and the app places each DJ's own photo or holiday outfit there with his name. (Optional setting lets the AI draw them instead.)"], ["3.0.2", "Text is never too small to read: AI flyers are told to keep every line big and bold, and the simple version wraps long lines instead of shrinking them below a readable size."], ["3.0.1", "AI flyers keep each DJ's name on the right man and keep the order from the DJ list (DJ Jamz on the left)."], ["3.0.0", "AI-designed flyers: ✨ Make my flyer now has Google Gemini 3 Pro Image design the whole flyer in the style of your Halloween flyer (holiday scene, DJs in costume, styled lettering and all your details), about 13¢ each. Try again or type a fix (like a spelling). Upload any flyer you love as the style example. The simple editable version is still there."], ["2.7.0", "Automatic flyer maker: fill in the event and press ✨ Make my flyer. It picks the holiday look from the date, dresses the DJs (with a Gemini key), lays everything out with no gaps or overlaps, shrinks long text to fit, places the logos, and updates the birthday sign and holiday wording. Nothing to adjust by hand."], ["2.6.1", "Removed duplicate buttons: Save flyer, Download PNG and WhatsApp each appear once, in the top bar."], ["2.6.0", "Share to WhatsApp: on a phone it opens the share sheet with the flyer picture attached, ready to pick WhatsApp and a chat. Where sharing isn't available it saves the picture and opens WhatsApp with the event text."], ["2.5.0", "Installable app: open Flyer Creator from its web address and install it on your phone or computer (⬇ Install app, or Share → Add to Home Screen on iPhone). Works offline once installed; each device keeps its own data, and Export/Import flyer file moves flyers between them."], ["2.4.0", "🎲 Shuffle look under the theme picker: a new style for the same holiday (colors, fonts, text effects, background pattern) while your words, DJs and logos stay. Back / Next through past looks, ♥ Save look for favorites, Original to reset. With a Gemini key, ✨ AI background paints a new background (cost shown)."], ["2.3.0", "Export flyer file / Import flyer file (Saved tab) moves a flyer with its DJs, outfits, logos and location into any version or device. Back up everything / Restore backup in Settings. The Create button always resets to Create after every run. Create is always clickable: when every DJ already has the outfit it becomes “Remake [holiday] outfits” (cost shown) and replaces them. Each DJ has a ↻ Redo button. The button can no longer get stuck after an error."], ["2.2.1", "Safer automatic background removal: it only runs when the background is plain, so it can never cut into a DJ. Use ✂ for anything it leaves."], ["2.2.0", "The Create button shows what this run will cost (for example: 2 outfits × ~4¢ = ~8¢), counting only DJs that still need the outfit. After a run it shows what was used, and Credits keeps the last run and a running total. Outfits always come out as cut-outs: stricter green-screen prompt, automatic background removal for any plain background (green, white or grey) with soft edges, and a ✂ Remove background button on the Build tab and on each outfit."], ["2.1.0", "New app icon for the browser tab and phone home screen."], ["2.0.0", "Gemini is back as the main way to make outfits in the app (about 4¢ each). Test key shows exactly what Google says, with 4 fix-it steps in Settings. ElevenLabs stays as an option for Pro plans."], ["1.9.0", "Holiday outfits now use ElevenLabs only. Key and Test key are in Settings, and the cost (about 433 credits per outfit) is on the button and in Credits. On ElevenLabs Pro the button makes outfits in the app; on other plans it gives you a request to paste to Claude in chat."], ["1.8.0", "DJ Jamz now has a built-in Christmas outfit (made with ElevenLabs). It shows automatically when you pick the Christmas theme."], ["1.7.1", "Pasted keys are cleaned up automatically, and Test key explains errors in plain words."], ["1.7.0", "API key lives only in Settings, with a Test key button. Create outfits always shows a clear message."], ["1.6.0", "Create outfits starts right away: no popup. The cost is on the button and a progress bar shows while it works. No key saved yet? A key box appears under the button and it starts as soon as you paste."], ["1.5.0", "One-tap outfits for every DJ on the flyer."], ["1.4.0", "Big “Create outfits” button on the Build tab, under the theme picker. It opens a step-by-step window for every DJ on the flyer."], ["1.3.0", "Nothing uses credits unless you choose to."], ["1.2.0", "Logos stay big enough to see: a minimum logo size (18% of the flyer width by default, adjustable in Settings). Nearby text makes a little room instead of the logo shrinking."], ["1.1.0", "Smart logo placement: logos go to the emptiest corner or edge, sized to fit, and move out of the way when DJs, promos or the theme change. Auto-place button and a setting to turn it off."], ["1.0.0", "First release: holiday themes, quick builder, DJ roster with holiday outfits, logos, locations, saved designs, PNG download, Credits and Settings."]];
 const settings = { allowPaid: false, geminiKey: "", geminiModel: "gemini-2.5-flash-image", elKey: "", elPro: undefined, defaultTheme: "halloween", defaultVenue: "venue-legion2", defaultDJs: ["dj-jamz", "dj-sirj"], defaultSize: "1024x1536", exportScale: 2, autoLogos: true, autoLayout: true, logoMin: .18, autosave: true, showTips: true, usage: { exports: 0, outfits: 0, spentEst: 0 } };
 async function loadSettings() { try { const s = await Local.get("settings"); if (s) { delete s.openaiKey; delete s.aiQuality; Object.assign(settings, s); settings.usage = Object.assign({ exports: 0, outfits: 0, spentEst: 0 }, s.usage || {}); } } catch {} }
 function saveSettings() { Local.set("settings", deep(settings)); }
@@ -2331,6 +2500,8 @@ checkForUpdate(); document.addEventListener("visibilitychange", () => { if (docu
 $("#undoBtn").onclick = undo; $("#redoBtn").onclick = redo;
 $("#exportBtn").onclick = () => exportPNG(settings.exportScale || 2);
 $("#waBtn").onclick = () => shareFlyer("whatsapp");
+$("#motionBtn").onclick = () => openMotion();
+$("#sizesBtn").onclick = () => openSizes();
 $("#saveBtn").onclick = () => saveDesign();
 $("#sizeSel").onchange = e => { const [w, hh] = e.target.value.split("x").map(Number); resizeDoc(w, hh); };
 (async function boot() {
